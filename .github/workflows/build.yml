@@ -1,4 +1,4 @@
-name: Build ESP32 OLED Chat Bin
+name: Build ESP32-S3-Zero IBMOVS Chat
 
 on:
   push:
@@ -10,30 +10,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout repo
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      # Setup Arduino CLI
       - name: Setup Arduino CLI
-        uses: arduino/setup-arduino-cli@v1
+        uses: arduino/setup-arduino-cli@v2
 
-      # Configure ESP32 board manager
-      - name: Configure Arduino CLI
+      - name: Configure Board Manager
         run: |
-          cat > arduino-cli.yaml << 'EOF'
-          board_manager:
-            additional_urls:
-              - https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-          EOF
+          arduino-cli config init
+          arduino-cli config set board_manager.additional_urls \
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 
-      # Install ESP32 core
       - name: Install ESP32 Core
         run: |
-          arduino-cli core update-index --config-file arduino-cli.yaml
-          arduino-cli core install esp32:esp32 --config-file arduino-cli.yaml
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
 
-      # Install required libraries
       - name: Install Libraries
         run: |
           arduino-cli lib update-index
@@ -41,18 +34,46 @@ jobs:
           arduino-cli lib install "ArduinoJson"
           arduino-cli lib install "WebSockets"
 
-      # Compile sketch
+      - name: Prepare Sketch Folder
+        run: |
+          mkdir -p sketch
+          # If .ino is in root, move it; otherwise it stays in sketch/
+          [ -f IBMOVS_Chat_v3.ino ] && cp IBMOVS_Chat_v3.ino sketch/sketch.ino || true
+
       - name: Compile Sketch
         run: |
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32s3 \
-            --output-dir build \
+            --fqbn esp32:esp32:waveshare_esp32_s3_zero \
+            --build-property build.flash_mode=qio \
+            --build-property build.flash_freq=80m \
+            --build-property build.flash_size=4MB \
             --build-property build.partitions=default \
+            --output-dir build \
             ./sketch
 
-      # Upload BIN file
-      - name: Upload BIN Artifact
+      - name: Rename BIN files
+        run: |
+          cd build
+          for f in *.bin; do
+            mv "$f" "IBMOVS_Chat_v3_${f}"
+          done
+          ls -lh
+
+      - name: Upload BIN Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-chat-bin
-          path: build/*.bin
+          name: IBMOVS-Chat-v3-ESP32S3Zero
+          path: |
+            build/*.bin
+            build/*.elf
+          retention-days: 30
+
+      - name: Print Build Summary
+        run: |
+          echo "## Build Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          for f in build/*.bin; do
+            size=$(du -h "$f" | cut -f1)
+            echo "| $(basename $f) | $size |" >> $GITHUB_STEP_SUMMARY
+          done
