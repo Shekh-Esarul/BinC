@@ -30,6 +30,8 @@ jobs:
       - name: Install Libraries
         run: |
           arduino-cli lib install "U8g2"
+          arduino-cli lib install "WebSockets"
+          arduino-cli lib install "ArduinoJson"
 
       - name: Compile Sketch
         run: |
