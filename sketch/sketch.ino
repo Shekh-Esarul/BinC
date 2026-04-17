@@ -3,336 +3,484 @@
 #include <SPI.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <WebSocketsServer.h>
 #include <DNSServer.h>
+#include <ArduinoJson.h>
 
-// â”€â”€â”€ OLED: SCK=GP1, SDA=GP2, CS=GP5, DC=GP4, RES=GP3 â”€â”€â”€
-U8G2_SH1106_128X64_NONAME_F_4W_SW_SPI u8g2(
-  U8G2_R0, 1, 2, 5, 4, 3
-);
+// ─── OLED ───
+U8G2_SH1106_128X64_NONAME_F_4W_SW_SPI u8g2(U8G2_R0, 1, 2, 5, 4, 3);
 
-// â”€â”€â”€ SoftAP Config â”€â”€â”€
-const char* AP_SSID     = "IBMOVS-Chat";
-const char* AP_PASSWORD = "";          // open network
+// ─── Network ───
+const char* AP_SSID = "IBMOVS-Chat";
+const char* AP_PASS = "";
 const IPAddress AP_IP(192, 168, 4, 1);
 const IPAddress AP_SUBNET(255, 255, 255, 0);
 
-WebServer server(80);
-DNSServer dnsServer;
+WebServer        httpServer(80);
+WebSocketsServer wsServer(81);
+DNSServer        dnsServer;
 
+// ─── State ───
 unsigned long startTime;
-int connectedClients = 0;
+int  totalMessages = 0;
+bool clients[10]   = {false};
+String clientNames[10];
 
-// â”€â”€â”€ Chat HTML (stored in flash) â”€â”€â”€
-const char CHAT_HTML[] PROGMEM = R"rawhtml(
-<!DOCTYPE html>
+// ─── Log buffer ───
+#define MAX_LOGS 40
+String logBuf[MAX_LOGS];
+int    logHead = 0, logCount = 0;
+
+void addLog(String msg) {
+  Serial.println(msg);
+  logBuf[logHead] = msg;
+  logHead = (logHead + 1) % MAX_LOGS;
+  if (logCount < MAX_LOGS) logCount++;
+}
+
+String getLogs() {
+  String out = "";
+  int start = (logCount < MAX_LOGS) ? 0 : logHead;
+  for (int i = 0; i < logCount; i++)
+    out += logBuf[(start + i) % MAX_LOGS] + "\n";
+  return out;
+}
+
+// ─── OLED ───
+void oledDraw() {
+  int c = WiFi.softAPgetStationNum();
+  unsigned long e = (millis() - startTime) / 1000;
+  char tb[9]; sprintf(tb, "%02lu:%02lu:%02lu", e/3600, (e/60)%60, e%60);
+  char cb[16]; sprintf(cb, "Users: %d", c);
+  char mb[16]; sprintf(mb, "Msgs:  %d", totalMessages);
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x10_tf);
+  u8g2.drawStr(16, 10, "IBMOVS CHAT");
+  u8g2.drawHLine(0, 13, 128);
+  u8g2.setFont(u8g2_font_5x7_tf);
+  u8g2.drawStr(0, 23, "WiFi: IBMOVS-Chat");
+  u8g2.drawStr(0, 32, "IP: 192.168.4.1");
+  u8g2.drawStr(0, 41, cb);
+  u8g2.drawStr(0, 50, mb);
+  u8g2.drawHLine(0, 53, 128);
+  u8g2.setFont(u8g2_font_logisoso16_tf);
+  u8g2.drawStr(22, 63, tb);
+  u8g2.sendBuffer();
+}
+
+// ─── Broadcast helpers ───
+void broadcastExcept(uint8_t skip, String p) {
+  for (int i = 0; i < 10; i++)
+    if (clients[i] && i != skip) wsServer.sendTXT(i, p);
+}
+void broadcastAll(String p) {
+  for (int i = 0; i < 10; i++)
+    if (clients[i]) wsServer.sendTXT(i, p);
+}
+
+// ─── Online list JSON ───
+String buildOnlineList() {
+  StaticJsonDocument<512> doc;
+  doc["type"] = "online";
+  JsonArray arr = doc.createNestedArray("users");
+  for (int i = 0; i < 10; i++)
+    if (clients[i] && clientNames[i].length() > 0) arr.add(clientNames[i]);
+  String out; serializeJson(doc, out); return out;
+}
+
+// ─── WS events ───
+void wsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED:
+      clients[num] = true; clientNames[num] = "";
+      addLog("[WS] #" + String(num) + " connected");
+      break;
+
+    case WStype_DISCONNECTED: {
+      String name = clientNames[num];
+      clients[num] = false; clientNames[num] = "";
+      addLog("[WS] #" + String(num) + " (" + name + ") disconnected");
+      if (name.length()) {
+        StaticJsonDocument<128> d; d["type"]="system";
+        d["text"] = name + " left the chat";
+        String o; serializeJson(d,o); broadcastAll(o);
+        broadcastAll(buildOnlineList());
+      }
+      break;
+    }
+
+    case WStype_TEXT: {
+      String msg = String((char*)payload);
+      StaticJsonDocument<8192> doc;
+      if (deserializeJson(doc, msg)) { addLog("[WS] JSON err"); return; }
+      String t = doc["type"].as<String>();
+
+      if (t == "join") {
+        String name = doc["name"].as<String>();
+        clientNames[num] = name;
+        addLog("[JOIN] " + name);
+        StaticJsonDocument<128> sys; sys["type"]="system";
+        sys["text"] = name + " joined the chat \xF0\x9F\x91\x8B";
+        String so; serializeJson(sys,so); broadcastExcept(num,so);
+        broadcastAll(buildOnlineList());
+        StaticJsonDocument<64> ack; ack["type"]="joined";
+        String ao; serializeJson(ack,ao); wsServer.sendTXT(num,ao);
+        return;
+      }
+
+      if (t == "chat" || t == "image") {
+        totalMessages++;
+        String name = clientNames[num];
+        addLog("[MSG] " + name + ": " + (t=="image" ? "[image]" : doc["text"].as<String>()));
+        broadcastAll(msg); // relay to everyone including sender
+        return;
+      }
+
+      if (t == "typing") { broadcastExcept(num, msg); return; }
+      if (t == "reaction") { broadcastAll(msg); return; }
+      break;
+    }
+  }
+}
+
+// ─── HTML ───
+const char HTML[] PROGMEM = R"rawhtml(<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>IBMOVS Chat</title>
 <style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:'Segoe UI',sans-serif;background:#0f0f1a;color:#e0e0e0;height:100dvh;display:flex;flex-direction:column}
-  #header{background:linear-gradient(135deg,#1a1a2e,#16213e);padding:12px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #2a2a4a}
-  #header .logo{width:36px;height:36px;background:linear-gradient(135deg,#00d4ff,#0066ff);border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:14px;color:#fff}
-  #header h1{font-size:16px;color:#00d4ff}
-  #header .sub{font-size:11px;color:#888;margin-top:2px}
-  #onlineBar{background:#111122;padding:6px 16px;font-size:11px;color:#00d4ff;border-bottom:1px solid #1a1a3a}
-  #messages{flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
-  .msg{max-width:80%;padding:8px 12px;border-radius:12px;font-size:13px;line-height:1.4;word-break:break-word}
-  .msg .meta{font-size:10px;margin-bottom:3px;opacity:0.7}
-  .msg.mine{background:linear-gradient(135deg,#0066ff,#0044cc);align-self:flex-end;border-bottom-right-radius:3px}
-  .msg.mine .meta{color:#aad4ff;text-align:right}
-  .msg.other{background:#1e1e3a;align-self:flex-start;border-bottom-left-radius:3px;border:1px solid #2a2a4a}
-  .msg.other .meta{color:#888}
-  .msg.system{background:#111;color:#666;font-size:11px;align-self:center;border-radius:20px;padding:4px 12px;border:1px solid #222}
-  #inputArea{padding:10px 12px;background:#111122;border-top:1px solid #1a1a3a;display:flex;gap:8px}
-  #msgInput{flex:1;background:#1a1a2e;border:1px solid #2a2a4a;border-radius:20px;padding:10px 16px;color:#e0e0e0;font-size:14px;outline:none}
-  #msgInput:focus{border-color:#0066ff}
-  #sendBtn{background:linear-gradient(135deg,#0066ff,#0044cc);border:none;border-radius:50%;width:42px;height:42px;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center}
-  #nameModal{position:fixed;inset:0;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;z-index:100}
-  #nameBox{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:16px;padding:28px 24px;width:280px;text-align:center}
-  #nameBox h2{color:#00d4ff;margin-bottom:6px;font-size:18px}
-  #nameBox p{color:#888;font-size:12px;margin-bottom:16px}
-  #nameInput{width:100%;background:#111;border:1px solid #2a2a4a;border-radius:8px;padding:10px 14px;color:#e0e0e0;font-size:15px;outline:none;margin-bottom:12px}
-  #joinBtn{width:100%;background:linear-gradient(135deg,#0066ff,#0044cc);border:none;border-radius:8px;padding:11px;color:#fff;font-size:15px;font-weight:bold;cursor:pointer}
-  ::-webkit-scrollbar{width:4px}
-  ::-webkit-scrollbar-track{background:#0f0f1a}
-  ::-webkit-scrollbar-thumb{background:#2a2a4a;border-radius:2px}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --bg:#0a0a14;--bg2:#111122;--bg3:#1a1a2e;--bg4:#16213e;
+  --accent:#4f8ef7;--green:#2ecc71;--text:#e8e8f0;--text2:#9090b0;
+  --border:#2a2a4a;--radius:18px;
+}
+html,body{height:100%;height:100dvh;overflow:hidden;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+#app{display:flex;flex-direction:column;height:100%;height:100dvh}
+#hdr{background:var(--bg4);padding:10px 14px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border);flex-shrink:0;box-shadow:0 2px 12px #0006}
+#hdr .av{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#4f8ef7,#6c63ff);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;flex-shrink:0}
+#hdr .info{flex:1;min-width:0}
+#hdr h1{font-size:15px;font-weight:700;color:var(--accent)}
+#hdr .sub{font-size:11px;color:var(--text2)}
+#hdr .btns{display:flex;gap:6px}
+#hdr button{background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:5px 9px;font-size:12px;cursor:pointer}
+#onBar{background:var(--bg2);padding:5px 14px;font-size:11px;color:var(--accent);border-bottom:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;gap:6px;overflow-x:auto;white-space:nowrap}
+.onDot{width:7px;height:7px;background:var(--green);border-radius:50%;flex-shrink:0;box-shadow:0 0 6px var(--green)}
+.onChip{background:var(--bg3);border:1px solid var(--border);border-radius:20px;padding:2px 8px;font-size:10px;color:var(--text2)}
+.onChip.me{border-color:var(--accent);color:var(--accent)}
+#msgs{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;scroll-behavior:smooth}
+#msgs::-webkit-scrollbar{width:3px}
+#msgs::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.bw{display:flex;flex-direction:column;max-width:78%}
+.bw.mine{align-self:flex-end;align-items:flex-end}
+.bw.other{align-self:flex-start;align-items:flex-start}
+.meta{font-size:10px;color:var(--text2);margin-bottom:2px;padding:0 4px}
+.meta .nm{font-weight:600}
+.bubble{padding:9px 13px;border-radius:var(--radius);font-size:14px;line-height:1.45;word-break:break-word;position:relative;cursor:pointer}
+.mine .bubble{background:linear-gradient(135deg,#4f8ef7,#6c63ff);border-bottom-right-radius:4px;color:#fff}
+.other .bubble{background:var(--bg3);border-bottom-left-radius:4px;border:1px solid var(--border)}
+.bubble img{max-width:100%;max-height:220px;border-radius:10px;display:block;margin-top:4px}
+.ts{font-size:10px;opacity:.5;margin-top:2px;padding:0 4px}
+.sys{align-self:center;background:#1118;border:1px solid var(--border);border-radius:20px;padding:3px 12px;font-size:11px;color:var(--text2);margin:2px 0}
+.rxPicker{display:none;position:absolute;bottom:calc(100% + 6px);background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:6px 8px;gap:6px;flex-wrap:wrap;width:180px;z-index:10;box-shadow:0 4px 20px #0008}
+.rxPicker.show{display:flex}
+.rxPicker span{font-size:22px;cursor:pointer}
+.rxRow{display:flex;gap:3px;margin-top:3px;flex-wrap:wrap}
+.rxChip{background:var(--bg3);border:1px solid var(--border);border-radius:20px;padding:2px 7px;font-size:13px;cursor:pointer}
+#typBar{padding:3px 16px;min-height:20px;font-size:11px;color:var(--text2);flex-shrink:0;font-style:italic}
+.df{display:inline-flex;gap:3px;vertical-align:middle}
+.df span{width:4px;height:4px;background:var(--text2);border-radius:50%;animation:df .9s infinite}
+.df span:nth-child(2){animation-delay:.2s}.df span:nth-child(3){animation-delay:.4s}
+@keyframes df{0%,80%,100%{opacity:.2}40%{opacity:1}}
+#inp{padding:8px 12px;background:var(--bg2);border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
+#txtInp{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:22px;padding:10px 16px;color:var(--text);font-size:14px;outline:none;resize:none;max-height:90px;min-height:40px;overflow-y:auto;line-height:1.4}
+#txtInp:focus{border-color:var(--accent)}
+#txtInp:empty:before{content:attr(placeholder);color:var(--text2);pointer-events:none}
+.ibtn{width:40px;height:40px;border-radius:50%;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
+#imgBtn{background:var(--bg3);border:1px solid var(--border);color:var(--text2)}
+#sndBtn{background:linear-gradient(135deg,#4f8ef7,#6c63ff);color:#fff;box-shadow:0 2px 10px #4f8ef755}
+.modal{display:none;position:fixed;inset:0;background:#000a;z-index:200;align-items:center;justify-content:center}
+.modal.show{display:flex}
+.mbox{background:var(--bg3);border:1px solid var(--border);border-radius:20px;padding:28px 24px;width:min(320px,90vw);text-align:center}
+.mbox h2{color:var(--accent);margin-bottom:6px;font-size:19px}
+.mbox p{color:var(--text2);font-size:12px;margin-bottom:18px;line-height:1.5}
+.mbox input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:11px 14px;color:var(--text);font-size:15px;outline:none;margin-bottom:12px}
+.mbox input:focus{border-color:var(--accent)}
+.pri{width:100%;background:linear-gradient(135deg,#4f8ef7,#6c63ff);border:none;border-radius:10px;padding:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer}
+#logBox{background:var(--bg);border:1px solid var(--border);border-radius:16px;padding:16px;width:min(400px,95vw);max-height:72vh;display:flex;flex-direction:column;gap:8px}
+#logBox h3{color:var(--accent);font-size:14px}
+#logContent{flex:1;overflow-y:auto;font-family:monospace;font-size:11px;color:#7f8;background:#050505;border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-all;min-height:80px}
+#logBox .lbtn{background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px;cursor:pointer;font-size:13px}
+#imgView{display:none;position:fixed;inset:0;background:#000d;z-index:300;align-items:center;justify-content:center}
+#imgView.show{display:flex}
+#imgView img{max-width:95vw;max-height:90vh;border-radius:12px}
+#imgView .cls{position:absolute;top:16px;right:20px;color:#fff;font-size:28px;cursor:pointer;line-height:1}
 </style>
 </head>
 <body>
+<div id="app">
+  <div id="hdr">
+    <div class="av">IB</div>
+    <div class="info"><h1>IBMOVS Chat</h1><div class="sub" id="subTxt">Connecting...</div></div>
+    <div class="btns">
+      <button onclick="showLogs()">&#128203; Logs</button>
+      <button onclick="clearChat()">&#128465;</button>
+    </div>
+  </div>
+  <div id="onBar"><div class="onDot"></div><span id="onList">No one online</span></div>
+  <div id="msgs"></div>
+  <div id="typBar"></div>
+  <div id="inp">
+    <button class="ibtn" id="imgBtn" onclick="document.getElementById('imgInp').click()">&#128247;</button>
+    <input type="file" id="imgInp" accept="image/*" style="display:none" onchange="sendImage(this)">
+    <div id="txtInp" contenteditable="true" placeholder="Message..."
+         oninput="onType()"
+         onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}"></div>
+    <button class="ibtn" id="sndBtn" onclick="sendMsg()">&#10148;</button>
+  </div>
+</div>
 
-<div id="nameModal">
-  <div id="nameBox">
-    <div style="font-size:36px;margin-bottom:8px">ðŸ’¬</div>
+<div class="modal show" id="nameModal">
+  <div class="mbox">
+    <div style="font-size:44px;margin-bottom:10px">&#128172;</div>
     <h2>IBMOVS Chat</h2>
-    <p>Hosted by ESP32-S3-Zero<br>Enter your name to join</p>
-    <input id="nameInput" type="text" placeholder="Your name..." maxlength="20" autocomplete="off">
-    <button id="joinBtn" onclick="joinChat()">Join Chat</button>
+    <p>Hosted on ESP32-S3-Zero<br>Local WiFi &bull; No internet needed</p>
+    <input id="nameInp" type="text" placeholder="Your name..." maxlength="20" autocomplete="off"
+           onkeydown="if(event.key==='Enter')join()">
+    <button class="pri" onclick="join()">Join Chat &#128640;</button>
   </div>
 </div>
 
-<div id="header">
-  <div class="logo">IB</div>
-  <div>
-    <h1>IBMOVS Chat</h1>
-    <div class="sub">ESP32-S3-Zero Hotspot</div>
+<div class="modal" id="logModal">
+  <div id="logBox">
+    <h3>&#128203; ESP32 Logs</h3>
+    <div id="logContent">Loading...</div>
+    <button class="lbtn" onclick="fetchLogs()">&#128260; Refresh</button>
+    <button class="lbtn" onclick="document.getElementById('logModal').classList.remove('show')">Close</button>
   </div>
 </div>
-<div id="onlineBar">ðŸŸ¢ <span id="onlineCount">0</span> online</div>
-<div id="messages"></div>
-<div id="inputArea">
-  <input id="msgInput" type="text" placeholder="Type a message..." maxlength="200" autocomplete="off" onkeydown="if(event.key==='Enter')sendMsg()">
-  <button id="sendBtn" onclick="sendMsg()">âž¤</button>
+
+<div id="imgView" onclick="this.classList.remove('show')">
+  <div class="cls">&#10005;</div>
+  <img id="viewImg" src="">
 </div>
 
 <script>
-// â”€â”€ State â”€â”€
-const STORAGE_KEY = 'ibmovs_chat_v1';
-const USERS_KEY   = 'ibmovs_users_v1';
-let myName = '';
-let myColor = '';
-let lastSeen = 0;
+const SK='ibmovs_v4';
+const RX=['&#128077;','&#10084;&#65039;','&#128514;','&#128558;','&#128546;','&#128293;','&#128079;','&#128175;'];
+let ws,myName,myColor,typTimer;
+let typUsers={};
+let msgMap={};
+const COLS=['#4f8ef7','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b','#20c997','#f06595'];
+function nc(n){let h=0;for(let c of n)h=(h*31+c.charCodeAt(0))&0xffff;return COLS[h%COLS.length]}
+function ft(t){const d=new Date(t);return d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0')}
+function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function uid(){return Math.random().toString(36).slice(2,10)}
+function lm(){try{return JSON.parse(localStorage.getItem(SK)||'[]')}catch{return[]}}
+function sm(m){if(m.length>300)m=m.slice(-300);localStorage.setItem(SK,JSON.stringify(m))}
 
-const COLORS = ['#00d4ff','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b','#20c997','#f06595'];
-
-function getColor(name) {
-  let h = 0;
-  for(let c of name) h = (h * 31 + c.charCodeAt(0)) & 0xffff;
-  return COLORS[h % COLORS.length];
+function join(){
+  const n=document.getElementById('nameInp').value.trim();
+  if(!n)return document.getElementById('nameInp').focus();
+  myName=n;myColor=nc(n);
+  document.getElementById('nameModal').classList.remove('show');
+  connectWS();
 }
 
-// â”€â”€ Storage helpers â”€â”€
-function loadMessages() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch(e) { return []; }
+function connectWS(){
+  document.getElementById('subTxt').textContent='Connecting...';
+  ws=new WebSocket('ws://192.168.4.1:81');
+  ws.onopen=()=>{
+    document.getElementById('subTxt').textContent='ESP32-S3-Zero Hotspot';
+    ws.send(JSON.stringify({type:'join',name:myName}));
+    renderAll();
+    document.getElementById('txtInp').focus();
+  };
+  ws.onclose=()=>{
+    document.getElementById('subTxt').textContent='Reconnecting...';
+    setTimeout(connectWS,2000);
+  };
+  ws.onmessage=e=>{try{handle(JSON.parse(e.data))}catch(err){console.error(err)}};
 }
-function saveMessages(msgs) {
-  // keep last 200
-  if(msgs.length > 200) msgs = msgs.slice(-200);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(msgs));
-}
-function loadUsers() {
-  try { return JSON.parse(localStorage.getItem(USERS_KEY) || '{}'); } catch(e) { return {}; }
-}
-function saveUsers(u) { localStorage.setItem(USERS_KEY, JSON.stringify(u)); }
 
-// â”€â”€ Presence â”€â”€
-function updatePresence() {
-  if(!myName) return;
-  const users = loadUsers();
-  users[myName] = Date.now();
-  // prune inactive (>15s)
-  for(const [k,v] of Object.entries(users)) {
-    if(Date.now() - v > 15000) delete users[k];
+function handle(m){
+  if(m.type==='online'){renderOnline(m.users);return}
+  if(m.type==='system'){appendSys(m.text);return}
+  if(m.type==='joined')return;
+  if(m.type==='typing'){
+    if(m.name===myName)return;
+    typUsers[m.name]=Date.now();renderTyp();return;
   }
-  saveUsers(users);
-  const count = Object.keys(users).length;
-  document.getElementById('onlineCount').textContent = count;
+  if(m.type==='reaction'){applyRx(m.msgId,m.emoji,m.name);return}
+  if(m.type==='chat'||m.type==='image'){
+    const msgs=lm();
+    if(!msgs.find(x=>x.id===m.id)){msgs.push(m);sm(msgs);appendBub(m,true)}
+    return;
+  }
 }
 
-// â”€â”€ Join â”€â”€
-function joinChat() {
-  const n = document.getElementById('nameInput').value.trim();
-  if(!n) { document.getElementById('nameInput').focus(); return; }
-  myName  = n;
-  myColor = getColor(n);
-  document.getElementById('nameModal').style.display = 'none';
-  updatePresence();
-  renderAll();
-  addSystemMsg(myName + ' joined the chat ðŸ‘‹');
-  setInterval(poll, 1000);
-  setInterval(updatePresence, 5000);
-  document.getElementById('msgInput').focus();
+function renderAll(){
+  const box=document.getElementById('msgs');
+  box.innerHTML='';msgMap={};
+  lm().forEach(m=>appendBub(m,false));
+  box.scrollTop=box.scrollHeight;
 }
 
-// â”€â”€ Render â”€â”€
-function renderAll() {
-  const box  = document.getElementById('messages');
-  const msgs = loadMessages();
-  box.innerHTML = '';
-  msgs.forEach(m => appendBubble(m, false));
-  box.scrollTop = box.scrollHeight;
-  if(msgs.length) lastSeen = msgs[msgs.length-1].ts;
-}
-
-function appendBubble(m, scroll=true) {
-  const box = document.getElementById('messages');
-  const div = document.createElement('div');
-  if(m.type === 'system') {
-    div.className = 'msg system';
-    div.textContent = m.text;
+function appendBub(m,scroll){
+  const mine=m.name===myName;
+  const col=nc(m.name);
+  const w=document.createElement('div');
+  w.className='bw '+(mine?'mine':'other');
+  w.dataset.id=m.id;
+  let content='';
+  if(m.type==='image'){
+    content='<img src="'+m.data+'" onclick="viewImg(this.src)" loading="lazy">';
   } else {
-    const mine = m.name === myName;
-    div.className = 'msg ' + (mine ? 'mine' : 'other');
-    const color = getColor(m.name);
-    div.innerHTML = `<div class="meta" style="color:${color}">${m.name} Â· ${formatTime(m.ts)}</div><div>${escHtml(m.text)}</div>`;
+    content=esc(m.text).replace(/\n/g,'<br>');
   }
-  box.appendChild(div);
-  if(scroll) box.scrollTop = box.scrollHeight;
+  w.innerHTML=
+    '<div class="meta"><span class="nm" style="color:'+col+'">'+esc(m.name)+'</span></div>'+
+    '<div class="bubble" onclick="toggleRx(event,\''+m.id+'\')">'+
+      content+
+      '<div class="rxPicker" id="rx_'+m.id+'">'+
+        RX.map(r=>'<span onclick="sendRx(event,\''+m.id+'\',\''+r+'\')">'+r+'</span>').join('')+
+      '</div>'+
+    '</div>'+
+    '<div class="rxRow" id="rxrow_'+m.id+'"></div>'+
+    '<div class="ts">'+ft(m.ts)+'</div>';
+  document.getElementById('msgs').appendChild(w);
+  msgMap[m.id]=w;
+  if(scroll)w.scrollIntoView({behavior:'smooth',block:'end'});
 }
 
-function escHtml(t) {
-  return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-function formatTime(ts) {
-  const d = new Date(ts);
-  return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
-}
-
-// â”€â”€ Poll for new messages â”€â”€
-function poll() {
-  updatePresence();
-  const msgs = loadMessages();
-  const newMsgs = msgs.filter(m => m.ts > lastSeen);
-  newMsgs.forEach(m => {
-    if(m.name !== myName) appendBubble(m);
-  });
-  if(newMsgs.length) lastSeen = newMsgs[newMsgs.length-1].ts;
+function appendSys(text){
+  const d=document.createElement('div');
+  d.className='sys';d.textContent=text;
+  document.getElementById('msgs').appendChild(d);
+  d.scrollIntoView({behavior:'smooth',block:'end'});
 }
 
-// â”€â”€ Send â”€â”€
-function sendMsg() {
-  const input = document.getElementById('msgInput');
-  const text  = input.value.trim();
-  if(!text || !myName) return;
-  const msg = { name: myName, text, ts: Date.now(), type: 'chat' };
-  const msgs = loadMessages();
-  msgs.push(msg);
-  saveMessages(msgs);
-  appendBubble(msg);
-  lastSeen = msg.ts;
-  input.value = '';
-  input.focus();
+let openRx=null;
+function toggleRx(e,id){
+  e.stopPropagation();
+  const p=document.getElementById('rx_'+id);
+  if(openRx&&openRx!==p)openRx.classList.remove('show');
+  p.classList.toggle('show');
+  openRx=p.classList.contains('show')?p:null;
+}
+document.addEventListener('click',()=>{if(openRx){openRx.classList.remove('show');openRx=null;}});
+
+function sendRx(e,msgId,emoji){
+  e.stopPropagation();
+  if(openRx){openRx.classList.remove('show');openRx=null;}
+  ws.send(JSON.stringify({type:'reaction',msgId,emoji,name:myName}));
+  applyRx(msgId,emoji,myName);
+}
+function applyRx(msgId,emoji,from){
+  const row=document.getElementById('rxrow_'+msgId);
+  if(!row)return;
+  let chip=row.querySelector('[data-e="'+emoji+'"]');
+  if(chip){chip.dataset.count=parseInt(chip.dataset.count||1)+1;chip.textContent=emoji+' '+chip.dataset.count;}
+  else{const c=document.createElement('div');c.className='rxChip';c.dataset.e=emoji;c.dataset.count=1;c.textContent=emoji;c.onclick=()=>sendRxDirect(msgId,emoji);row.appendChild(c);}
+}
+function sendRxDirect(msgId,emoji){
+  ws.send(JSON.stringify({type:'reaction',msgId,emoji,name:myName}));
+  applyRx(msgId,emoji,myName);
 }
 
-function addSystemMsg(text) {
-  const msg = { type: 'system', text, ts: Date.now() };
-  const msgs = loadMessages();
-  msgs.push(msg);
-  saveMessages(msgs);
-  appendBubble(msg);
-  lastSeen = msg.ts;
+function renderOnline(users){
+  const el=document.getElementById('onList');
+  if(!users||!users.length){el.innerHTML='No one online';return;}
+  el.innerHTML=users.map(u=>'<span class="onChip'+(u===myName?' me':'')+'">'+ esc(u)+'</span>').join(' ');
 }
 
-// â”€â”€ Auto-focus name input â”€â”€
-window.onload = () => document.getElementById('nameInput').focus();
+function onType(){
+  if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'typing',name:myName}));
+  clearTimeout(typTimer);
+  typTimer=setTimeout(()=>{},2000);
+}
+
+function renderTyp(){
+  const now=Date.now();
+  Object.keys(typUsers).forEach(k=>{if(now-typUsers[k]>3000)delete typUsers[k]});
+  const others=Object.keys(typUsers).filter(k=>k!==myName);
+  const bar=document.getElementById('typBar');
+  if(!others.length){bar.innerHTML='';return;}
+  bar.innerHTML=esc(others.join(', '))+' is typing <span class="df"><span></span><span></span><span></span></span>';
+  setTimeout(renderTyp,1500);
+}
+
+function sendMsg(){
+  const el=document.getElementById('txtInp');
+  const text=el.innerText.trim();
+  if(!text||!ws||ws.readyState!==1)return;
+  const m={type:'chat',id:uid(),name:myName,text,ts:Date.now()};
+  ws.send(JSON.stringify(m));
+  const msgs=lm();msgs.push(m);sm(msgs);
+  appendBub(m,true);
+  el.innerText='';
+}
+
+function sendImage(input){
+  const file=input.files[0];if(!file)return;
+  const reader=new FileReader();
+  reader.onload=e=>{
+    const img=new Image();
+    img.onload=()=>{
+      const MAX=600;let w=img.width,h=img.height;
+      if(w>MAX){h=Math.round(h*MAX/w);w=MAX;}
+      const cv=document.createElement('canvas');cv.width=w;cv.height=h;
+      cv.getContext('2d').drawImage(img,0,0,w,h);
+      const data=cv.toDataURL('image/jpeg',0.7);
+      const m={type:'image',id:uid(),name:myName,data,ts:Date.now()};
+      ws.send(JSON.stringify(m));
+      const msgs=lm();msgs.push(m);sm(msgs);
+      appendBub(m,true);
+    };
+    img.src=e.target.result;
+  };
+  reader.readAsDataURL(file);input.value='';
+}
+
+function viewImg(src){document.getElementById('viewImg').src=src;document.getElementById('imgView').classList.add('show');}
+function showLogs(){document.getElementById('logModal').classList.add('show');fetchLogs();}
+function fetchLogs(){fetch('/logs').then(r=>r.text()).then(t=>{const el=document.getElementById('logContent');el.textContent=t||'No logs.';el.scrollTop=el.scrollHeight;}).catch(()=>{document.getElementById('logContent').textContent='Failed to fetch.';});}
+function clearChat(){if(confirm('Clear all messages?')){localStorage.removeItem(SK);document.getElementById('msgs').innerHTML='';msgMap={};}}
+window.onload=()=>document.getElementById('nameInp').focus();
 </script>
 </body>
 </html>
 )rawhtml";
 
-// â”€â”€â”€ OLED Display Helper â”€â”€â”€
-void oledStatus(const char* line1, const char* line2 = "", const char* line3 = "") {
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_6x10_tf);
-  u8g2.drawStr(0, 10, line1);
-  u8g2.setFont(u8g2_font_5x7_tf);
-  if(strlen(line2)) u8g2.drawStr(0, 24, line2);
-  if(strlen(line3)) u8g2.drawStr(0, 34, line3);
-  u8g2.sendBuffer();
-}
-
-// â”€â”€â”€ Web Handlers â”€â”€â”€
-void handleRoot() {
-  server.send_P(200, "text/html", CHAT_HTML);
-}
-
-void handleNotFound() {
-  // Captive portal â€” redirect everything to root
-  server.sendHeader("Location", "http://192.168.4.1/", true);
-  server.send(302, "text/plain", "");
-}
+void handleRoot()    { httpServer.send_P(200,"text/html",HTML); }
+void handleLogs()    { httpServer.send(200,"text/plain",getLogs()); }
+void handleNotFound(){ httpServer.sendHeader("Location","http://192.168.4.1/",true); httpServer.send(302,"text/plain",""); }
 
 void setup() {
-  Serial.begin(115200);
-  delay(500);
-  Serial.println("\n=== IBMOVS ESP32-S3 Boot ===");
-
-  // â”€â”€ OLED Init â”€â”€
-  Serial.println("[OLED] Initializing...");
-  oledStatus("IBMOVS Boot", "OLED OK");
-  u8g2.begin();
-  oledStatus("IBMOVS Boot", "OLED OK");
-  Serial.println("[OLED] OK");
-  delay(500);
-
-  // â”€â”€ WiFi SoftAP â”€â”€
-  Serial.println("[WiFi] Starting SoftAP...");
-  oledStatus("Starting WiFi", "SoftAP...");
+  Serial.begin(115200); delay(400);
+  addLog("=== IBMOVS ESP32-S3 Boot ===");
+  u8g2.begin(); oledDraw(); addLog("[OLED] OK");
   WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(AP_IP, AP_IP, AP_SUBNET);
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-  Serial.printf("[WiFi] SSID: %s\n", AP_SSID);
-  Serial.printf("[WiFi] IP:   %s\n", AP_IP.toString().c_str());
-  oledStatus("WiFi UP!", AP_SSID, "192.168.4.1");
-  delay(800);
-
-  // â”€â”€ DNS (Captive Portal) â”€â”€
-  Serial.println("[DNS] Starting captive portal DNS...");
-  dnsServer.start(53, "*", AP_IP);
-  Serial.println("[DNS] OK â€” all domains -> 192.168.4.1");
-
-  // â”€â”€ Web Server â”€â”€
-  Serial.println("[HTTP] Starting web server...");
-  server.on("/", handleRoot);
-  server.on("/chat", handleRoot);
-  server.onNotFound(handleNotFound);
-  server.begin();
-  Serial.println("[HTTP] Server started on port 80");
-
-  startTime = millis();
-  Serial.println("[BOOT] All systems GO!");
+  WiFi.softAPConfig(AP_IP,AP_IP,AP_SUBNET);
+  WiFi.softAP(AP_SSID,AP_PASS);
+  addLog("[WiFi] SoftAP: " + String(AP_SSID) + " @ 192.168.4.1");
+  dnsServer.start(53,"*",AP_IP); addLog("[DNS] Captive portal OK");
+  httpServer.on("/",handleRoot);
+  httpServer.on("/chat",handleRoot);
+  httpServer.on("/logs",handleLogs);
+  httpServer.onNotFound(handleNotFound);
+  httpServer.begin(); addLog("[HTTP] Port 80 OK");
+  wsServer.begin(); wsServer.onEvent(wsEvent);
+  addLog("[WS] Port 81 OK");
+  startTime=millis(); addLog("[BOOT] All systems GO!");
 }
 
 void loop() {
   dnsServer.processNextRequest();
-  server.handleClient();
-
-  // â”€â”€ Update OLED every second â”€â”€
-  static unsigned long lastOled = 0;
-  if(millis() - lastOled > 1000) {
-    lastOled = millis();
-
-    unsigned long elapsed = (millis() - startTime) / 1000;
-    int ss = elapsed % 60;
-    int mm = (elapsed / 60) % 60;
-    int hh = elapsed / 3600;
-
-    char timeBuf[9];
-    sprintf(timeBuf, "%02d:%02d:%02d", hh, mm, ss);
-
-    int clients = WiFi.softAPgetStationNum();
-    if(clients != connectedClients) {
-      connectedClients = clients;
-      Serial.printf("[WiFi] Clients connected: %d\n", clients);
-    }
-
-    char clientBuf[20];
-    sprintf(clientBuf, "Users: %d", clients);
-
-    u8g2.clearBuffer();
-
-    // Title
-    u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(20, 10, "IBMOVS CHAT");
-    u8g2.drawHLine(0, 13, 128);
-
-    // SSID
-    u8g2.setFont(u8g2_font_5x7_tf);
-    u8g2.drawStr(0, 24, "WiFi: IBMOVS-Chat");
-
-    // IP
-    u8g2.drawStr(0, 33, "IP: 192.168.4.1");
-
-    // Clients
-    u8g2.drawStr(0, 42, clientBuf);
-
-    // Uptime
-    u8g2.drawHLine(0, 45, 128);
-    u8g2.setFont(u8g2_font_logisoso16_tf);
-    u8g2.drawStr(22, 63, timeBuf);
-
-    u8g2.sendBuffer();
-  }
+  httpServer.handleClient();
+  wsServer.loop();
+  static unsigned long lo=0;
+  if(millis()-lo>1000){lo=millis();oledDraw();}
 }
