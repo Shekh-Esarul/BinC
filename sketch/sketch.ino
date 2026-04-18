@@ -304,10 +304,9 @@ void wsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
 
     case WStype_CONNECTED:
-      clients[num] = true; clientNames[num] = "";
-      addLog("[WS] #" + String(num) + " connected");
-      wsServer.setAutoPing(false);
-      break;
+  clients[num] = true; clientNames[num] = "";
+  addLog("[WS] #" + String(num) + " connected");
+  break;
 
     case WStype_DISCONNECTED: {
       String name = clientNames[num];
