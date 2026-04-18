@@ -34,72 +34,89 @@ jobs:
           arduino-cli lib install "ArduinoJson"
           arduino-cli lib install "WebSockets"
 
-      # ✅ Robust sketch detection
+      # 🔥 FIXED SKETCH DETECTION
       - name: Prepare Sketch Folder
         run: |
           mkdir -p sketch
-          FILE=$(find . -maxdepth 2 -name "*.ino" | head -n 1)
-          if [ -z "$FILE" ]; then
-            echo "❌ No .ino file found!"
-            exit 1
-          fi
-          echo "Using sketch: $FILE"
-          cp "$FILE" sketch/sketch.ino
 
-      # ✅ FIXED BUILD CONFIG
+          if [ -f "sketch/sketch.ino" ]; then
+            echo "✅ Using existing sketch/sketch.ino"
+          else
+            echo "🔍 Searching for .ino file..."
+            FILE=$(find . -maxdepth 2 -name "*.ino" ! -path "./sketch/*" | head -n 1)
+
+            if [ -n "$FILE" ]; then
+              echo "Found: $FILE"
+              cp "$FILE" sketch/sketch.ino
+            else
+              echo "❌ No .ino file found!"
+              ls -R
+              exit 1
+            fi
+          fi
+
+          ls -lh sketch/
+
+      # 🔥 FIXED FQBN
       - name: Compile Sketch
         run: |
           arduino-cli compile \
-            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,FlashSize=8M,PartitionScheme=huge_app,FlashFreq=80M,FlashMode=qio" \
+            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,FlashSize=4M,PartitionScheme=default,FlashFreq=80M,FlashMode=qio" \
             --output-dir build \
             ./sketch
 
-      # ✅ Show files clearly
       - name: List build output
         run: |
-          echo "=== BUILD FILES ==="
-          ls -lh build/
+          if [ -d build ]; then
+            ls -lh build/
+          else
+            echo "❌ Build folder not found!"
+            exit 1
+          fi
 
-      # ✅ Clean rename (important)
+      # 🔥 SAFE RENAME
       - name: Rename BIN files
         run: |
-          cd build
-          for f in *.bin; do
-            mv "$f" "IBMOVS_v3_$f"
-          done
-          ls -lh
+          if ls build/*.bin 1> /dev/null 2>&1; then
+            cd build
+            for f in *.bin; do
+              mv "$f" "IBMOVS_v3_${f}"
+            done
+            ls -lh
+          else
+            echo "❌ No BIN files found!"
+            exit 1
+          fi
 
-      # ✅ Upload EVERYTHING needed
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: IBMOVS-Chat-v3-ESP32S3
-          path: build/*
+          name: IBMOVS-Chat-v3-Bins
+          path: build/*.bin
           retention-days: 30
 
-      # ✅ Proper flash instructions
+      # 🔥 CLEAN SUMMARY
       - name: Build Summary
         run: |
           echo "## ✅ Build Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📦 BIN Files:" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Address | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|---------|------|" >> $GITHUB_STEP_SUMMARY
 
           for f in build/*.bin; do
             name=$(basename "$f")
             size=$(du -h "$f" | cut -f1)
 
-            if [[ "$name" == *"bootloader"* ]]; then addr="0x0000"
-            elif [[ "$name" == *"partitions"* ]]; then addr="0x8000"
-            else addr="0x10000"; fi
+            if [[ "$name" == *"bootloader"* ]]; then
+              addr="0x0000"
+            elif [[ "$name" == *"partition"* ]]; then
+              addr="0x8000"
+            else
+              addr="0x10000"
+            fi
 
-            echo "- $name → $addr ($size)" >> $GITHUB_STEP_SUMMARY
+            echo "| $name | \`$addr\` | $size |" >> $GITHUB_STEP_SUMMARY
           done
 
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ⚡ Flash Command:" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "esptool.py --chip esp32s3 --port COM3 --baud 921600 write_flash -z \\" >> $GITHUB_STEP_SUMMARY
-          echo "0x0000 bootloader.bin \\" >> $GITHUB_STEP_SUMMARY
-          echo "0x8000 partitions.bin \\" >> $GITHUB_STEP_SUMMARY
-          echo "0x10000 firmware.bin" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚠️ Flash ALL files correctly using esptool or ESPFlash" >> $GITHUB_STEP_SUMMARY
