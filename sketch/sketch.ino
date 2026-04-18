@@ -41,7 +41,7 @@ U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /*clk=*/3, /*data=*/4, U8X8_PI
 
 // ─── Network ──────────────────────────────────────────────────────────────────
 const char*    AP_SSID   = "IBMOVS-Chat";
-const char*    AP_PASS   = "";          // open network
+const char*    AP_PASS   = "12345678";          // open network
 const IPAddress AP_IP(192, 168, 4, 1);
 const IPAddress AP_SUBNET(255, 255, 255, 0);
 
