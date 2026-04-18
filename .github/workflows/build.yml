@@ -1,4 +1,4 @@
-name: Build IBMOVS Chat ESP32-S3-Zeroxx
+name: Build IBMOVS Chat ESP32-S3-Zero
 
 on:
   push:
@@ -37,7 +37,6 @@ jobs:
       - name: Prepare Sketch Folder
         run: |
           mkdir -p sketch
-          # Looks for your file and renames it to sketch.ino for the compiler
           if [ -f IBMOVS_Chat_v3.ino ]; then
             cp IBMOVS_Chat_v3.ino sketch/sketch.ino
           else
@@ -47,8 +46,7 @@ jobs:
 
       - name: Compile Sketch
         run: |
-          # Fixed FQBN: Changed FlashFreq=80 to FlashFreq=80M
-          # This matches the expected enumeration for the ESP32-S3 board definition
+          # FQBN fixed with 80M
           arduino-cli compile \
             --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,FlashSize=4M,PartitionScheme=default,FlashFreq=80M,FlashMode=qio" \
             --output-dir build \
@@ -66,7 +64,7 @@ jobs:
           ls -lh
 
       - name: Upload Artifacts
-        uses: upload-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           name: IBMOVS-Chat-v3-Bins
           path: build/*.bin
@@ -86,6 +84,3 @@ jobs:
             else addr="0x10000"; fi
             echo "| $name | \`$addr\` | $size |" >> $GITHUB_STEP_SUMMARY
           done
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ⚠️ Flash Instructions" >> $GITHUB_STEP_SUMMARY
-          echo "Use the addresses listed above with esptool.py or the ESP Flash Download Tool." >> $GITHUB_STEP_SUMMARY
