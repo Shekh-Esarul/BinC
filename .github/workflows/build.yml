@@ -36,16 +36,20 @@ jobs:
 
       - name: Prepare Sketch Folder
         run: |
-          mkdir -p sketch
-          # Dhoondo koi bhi .ino file agar exact naam nahi mil raha
-          FILE=$(find . -maxdepth 2 -name "*.ino" | head -n 1)
-          if [ -n "$FILE" ]; then
-            echo "Found sketch: $FILE"
-            cp "$FILE" sketch/sketch.ino
+          # Agar 'sketch' folder nahi hai, toh dhoondो aur banao
+          if [ ! -f "sketch/sketch.ino" ]; then
+            echo "Standard structure not found. Searching for .ino file..."
+            FILE=$(find . -maxdepth 2 -name "*.ino" | head -n 1)
+            if [ -n "$FILE" ]; then
+              echo "Found sketch at $FILE. Setting up folder..."
+              mkdir -p sketch
+              cp "$FILE" sketch/sketch.ino
+            else
+              echo "Error: No .ino file found!"
+              exit 1
+            fi
           else
-            echo "Error: No .ino file found in the repository!"
-            ls -R
-            exit 1
+            echo "Standard 'sketch/sketch.ino' structure detected. Skipping copy."
           fi
 
       - name: Compile Sketch
@@ -60,10 +64,12 @@ jobs:
 
       - name: Rename BIN files
         run: |
-          cd build
-          for f in *.bin; do
-            mv "$f" "IBMOVS_v3_${f}"
-          done
+          if [ -d build ]; then
+            cd build
+            for f in *.bin; do
+              mv "$f" "IBMOVS_v3_${f}"
+            done
+          fi
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -75,8 +81,12 @@ jobs:
       - name: Build Summary
         run: |
           echo "## ✅ Build Complete" >> $GITHUB_STEP_SUMMARY
-          for f in build/*.bin; do
-            name=$(basename "$f")
-            size=$(du -h "$f" | cut -f1)
-            echo "- $name ($size)" >> $GITHUB_STEP_SUMMARY
-          done
+          if [ -d build ]; then
+            for f in build/*.bin; do
+              name=$(basename "$f")
+              size=$(du -h "$f" | cut -f1)
+              echo "- $name ($size)" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "Build directory not found!" >> $GITHUB_STEP_SUMMARY
+          fi
