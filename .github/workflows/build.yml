@@ -37,16 +37,19 @@ jobs:
       - name: Prepare Sketch Folder
         run: |
           mkdir -p sketch
-          if [ -f IBMOVS_Chat_v3.ino ]; then
-            cp IBMOVS_Chat_v3.ino sketch/sketch.ino
+          # Dhoondo koi bhi .ino file agar exact naam nahi mil raha
+          FILE=$(find . -maxdepth 2 -name "*.ino" | head -n 1)
+          if [ -n "$FILE" ]; then
+            echo "Found sketch: $FILE"
+            cp "$FILE" sketch/sketch.ino
           else
-            echo "Error: IBMOVS_Chat_v3.ino not found!"
+            echo "Error: No .ino file found in the repository!"
+            ls -R
             exit 1
           fi
 
       - name: Compile Sketch
         run: |
-          # FQBN fixed with 80M
           arduino-cli compile \
             --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,FlashSize=4M,PartitionScheme=default,FlashFreq=80M,FlashMode=qio" \
             --output-dir build \
@@ -61,7 +64,6 @@ jobs:
           for f in *.bin; do
             mv "$f" "IBMOVS_v3_${f}"
           done
-          ls -lh
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -73,14 +75,8 @@ jobs:
       - name: Build Summary
         run: |
           echo "## ✅ Build Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| File | Address | Size |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|---------|------|" >> $GITHUB_STEP_SUMMARY
           for f in build/*.bin; do
             name=$(basename "$f")
             size=$(du -h "$f" | cut -f1)
-            if   [[ "$name" == *"bootloader"* ]]; then addr="0x0000"
-            elif [[ "$name" == *"partition"* ]];  then addr="0x8000"
-            else addr="0x10000"; fi
-            echo "| $name | \`$addr\` | $size |" >> $GITHUB_STEP_SUMMARY
+            echo "- $name ($size)" >> $GITHUB_STEP_SUMMARY
           done
