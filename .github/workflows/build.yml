@@ -1,8 +1,8 @@
-name: ESP32-S3 Firmware Build (Stable Final)
+name: Build ESP32-S3-Zero IBMOVS Chat
 
 on:
   push:
-    branches: ["main"]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -11,47 +11,82 @@ jobs:
 
     steps:
       # ─────────────────────────────
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       # ─────────────────────────────
-      - name: Install Arduino CLI
+      - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
       # ─────────────────────────────
-      - name: Setup ESP32 Core (FIXED VERSION)
+      - name: Enable unsafe library installs (FIX)
         run: |
           arduino-cli config init
-          arduino-cli config set board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli config set library.enable_unsafe_install true
+
+      # ─────────────────────────────
+      - name: Configure ESP32 Core
+        run: |
+          arduino-cli config set board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      # ─────────────────────────────
+      - name: Install ESP32 Core (stable)
+        run: |
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@2.0.17
 
       # ─────────────────────────────
-      - name: Install required libraries
+      - name: Install Libraries (FIXED)
         run: |
+          arduino-cli lib update-index
           arduino-cli lib install "U8g2"
           arduino-cli lib install "ArduinoJson"
 
-          # Stable WebSockets library (IMPORTANT FIX)
-          arduino-cli lib install --git-url https://github.com/Links2004/arduinoWebSockets.git
+          # FIX: NO git-url, use registry version
+          arduino-cli lib install "WebSockets"
 
       # ─────────────────────────────
-      - name: Verify libraries
-        run: arduino-cli lib list
+      - name: Prepare Sketch
+        run: |
+          mkdir -p sketch
+          cp IBMOVS_Chat_v3.ino sketch/sketch.ino
 
       # ─────────────────────────────
-      - name: Compile ESP32-S3 Sketch
+      - name: Compile Sketch
         run: |
           arduino-cli compile \
             --fqbn esp32:esp32:esp32s3 \
-            sketch/sketch.ino \
+            --build-property build.flash_mode=qio \
+            --build-property build.flash_freq=80m \
+            --build-property build.flash_size=4MB \
+            --build-property build.partitions=default \
             --output-dir build \
-            --clean \
-            --verbose
+            sketch
 
       # ─────────────────────────────
-      - name: Upload firmware (.bin)
+      - name: Rename BIN files
+        run: |
+          cd build
+          for f in *.bin; do
+            mv "$f" "IBMOVS_Chat_v3_${f}"
+          done
+          ls -lh
+
+      # ─────────────────────────────
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: esp32s3-firmware
-          path: build/*.bin
+          name: IBMOVS-Chat-v3-ESP32S3Zero
+          path: |
+            build/*.bin
+            build/*.elf
+          retention-days: 30
+
+      # ─────────────────────────────
+      - name: Build Summary
+        run: |
+          echo "## Build Complete ✅" >> $GITHUB_STEP_SUMMARY
+          for f in build/*.bin; do
+            echo "- $(basename $f)" >> $GITHUB_STEP_SUMMARY
+          done
