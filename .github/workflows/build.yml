@@ -20,7 +20,7 @@ jobs:
         run: |
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls \
-            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 
       - name: Install ESP32 Core
         run: |
@@ -34,59 +34,72 @@ jobs:
           arduino-cli lib install "ArduinoJson"
           arduino-cli lib install "WebSockets"
 
+      # ✅ Robust sketch detection
       - name: Prepare Sketch Folder
         run: |
-          # Agar 'sketch' folder nahi hai, toh dhoondो aur banao
-          if [ ! -f "sketch/sketch.ino" ]; then
-            echo "Standard structure not found. Searching for .ino file..."
-            FILE=$(find . -maxdepth 2 -name "*.ino" | head -n 1)
-            if [ -n "$FILE" ]; then
-              echo "Found sketch at $FILE. Setting up folder..."
-              mkdir -p sketch
-              cp "$FILE" sketch/sketch.ino
-            else
-              echo "Error: No .ino file found!"
-              exit 1
-            fi
-          else
-            echo "Standard 'sketch/sketch.ino' structure detected. Skipping copy."
+          mkdir -p sketch
+          FILE=$(find . -maxdepth 2 -name "*.ino" | head -n 1)
+          if [ -z "$FILE" ]; then
+            echo "❌ No .ino file found!"
+            exit 1
           fi
+          echo "Using sketch: $FILE"
+          cp "$FILE" sketch/sketch.ino
 
+      # ✅ FIXED BUILD CONFIG
       - name: Compile Sketch
         run: |
           arduino-cli compile \
-            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,FlashSize=4M,PartitionScheme=default,FlashFreq=80M,FlashMode=qio" \
+            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,FlashSize=8M,PartitionScheme=huge_app,FlashFreq=80M,FlashMode=qio" \
             --output-dir build \
             ./sketch
 
+      # ✅ Show files clearly
       - name: List build output
-        run: ls -lh build/
+        run: |
+          echo "=== BUILD FILES ==="
+          ls -lh build/
 
+      # ✅ Clean rename (important)
       - name: Rename BIN files
         run: |
-          if [ -d build ]; then
-            cd build
-            for f in *.bin; do
-              mv "$f" "IBMOVS_v3_${f}"
-            done
-          fi
+          cd build
+          for f in *.bin; do
+            mv "$f" "IBMOVS_v3_$f"
+          done
+          ls -lh
 
+      # ✅ Upload EVERYTHING needed
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: IBMOVS-Chat-v3-Bins
-          path: build/*.bin
+          name: IBMOVS-Chat-v3-ESP32S3
+          path: build/*
           retention-days: 30
 
+      # ✅ Proper flash instructions
       - name: Build Summary
         run: |
           echo "## ✅ Build Complete" >> $GITHUB_STEP_SUMMARY
-          if [ -d build ]; then
-            for f in build/*.bin; do
-              name=$(basename "$f")
-              size=$(du -h "$f" | cut -f1)
-              echo "- $name ($size)" >> $GITHUB_STEP_SUMMARY
-            done
-          else
-            echo "Build directory not found!" >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 BIN Files:" >> $GITHUB_STEP_SUMMARY
+
+          for f in build/*.bin; do
+            name=$(basename "$f")
+            size=$(du -h "$f" | cut -f1)
+
+            if [[ "$name" == *"bootloader"* ]]; then addr="0x0000"
+            elif [[ "$name" == *"partitions"* ]]; then addr="0x8000"
+            else addr="0x10000"; fi
+
+            echo "- $name → $addr ($size)" >> $GITHUB_STEP_SUMMARY
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚡ Flash Command:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "esptool.py --chip esp32s3 --port COM3 --baud 921600 write_flash -z \\" >> $GITHUB_STEP_SUMMARY
+          echo "0x0000 bootloader.bin \\" >> $GITHUB_STEP_SUMMARY
+          echo "0x8000 partitions.bin \\" >> $GITHUB_STEP_SUMMARY
+          echo "0x10000 firmware.bin" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
