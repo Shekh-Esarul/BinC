@@ -1,4 +1,4 @@
-name: Build IBMOVS Chat ESP32-S3-Zero
+name: Build ESP32-S3-Zero IBMOVS Chat
 
 on:
   push:
@@ -10,120 +10,68 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 📦 Checkout
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ⚙️ Arduino CLI
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
-      # 📡 ESP32 Board URL
       - name: Configure Board Manager
         run: |
           arduino-cli config init
           arduino-cli config set board_manager.additional_urls \
-          https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 
-      # 📥 Install ESP32 Core (LOCKED STABLE)
       - name: Install ESP32 Core
         run: |
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32@2.0.14
+          arduino-cli core install esp32:esp32
 
-      # 📚 Install Libraries (ALL REQUIRED)
       - name: Install Libraries
         run: |
           arduino-cli lib update-index
           arduino-cli lib install "U8g2"
-          arduino-cli lib install "ArduinoJson@6.21.3"
-          arduino-cli lib install "WebSockets@2.3.6"
+          arduino-cli lib install "ArduinoJson"
+          arduino-cli lib install "WebSockets"
 
-      # 🔍 Auto Detect Sketch (NO ERROR)
       - name: Prepare Sketch Folder
         run: |
           mkdir -p sketch
+          FILE=$(find . -maxdepth 2 -name "*.ino" | head -n 1)
+          cp "$FILE" sketch/sketch.ino
+          echo "Using: $FILE"
 
-          if [ -f "sketch/sketch.ino" ]; then
-            echo "Using existing sketch/sketch.ino"
-          else
-            echo "Searching for .ino file..."
-            FILE=$(find . -maxdepth 2 -name "*.ino" ! -path "./sketch/*" | head -n 1)
-
-            if [ -n "$FILE" ]; then
-              echo "Found: $FILE"
-              cp "$FILE" sketch/sketch.ino
-            else
-              echo "No .ino file found!"
-              ls -R
-              exit 1
-            fi
-          fi
-
-          ls -lh sketch/
-
-      # 🧠 Compile (FIXED)
       - name: Compile Sketch
         run: |
           arduino-cli compile \
             --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,FlashSize=4M,PartitionScheme=default" \
+            --build-property build.flash_mode=qio \
+            --build-property build.flash_freq=80m \
             --output-dir build \
             ./sketch
 
-      # 📂 Check Output
-      - name: List build output
-        run: |
-          if [ -d build ]; then
-            ls -lh build/
-          else
-            echo "Build failed!"
-            exit 1
-          fi
+      - name: List Build Output
+        run: ls -lh build/
 
-      # 🔄 Rename BIN safely
-      - name: Rename BIN files
+      - name: Rename BIN Files
         run: |
-          if ls build/*.bin 1> /dev/null 2>&1; then
-            cd build
-            for f in *.bin; do
-              mv "$f" "IBMOVS_v3_${f}"
-            done
-            ls -lh
-          else
-            echo "No BIN files found!"
-            exit 1
-          fi
+          cd build
+          for f in *.bin; do
+            mv "$f" "IBMOVS_Chat_v3_${f}"
+          done
 
-      # ☁️ Upload BIN files
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: IBMOVS-Chat-v3-Bins
-          path: build/*.bin
+          name: IBMOVS-Chat-v3-ESP32S3Zero
+          path: build/*
           retention-days: 30
 
-      # 📊 Summary
       - name: Build Summary
         run: |
-          echo "## Build Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| File | Address | Size |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|---------|------|" >> $GITHUB_STEP_SUMMARY
-
+          echo "## Build Complete ✅" >> $GITHUB_STEP_SUMMARY
           for f in build/*.bin; do
             name=$(basename "$f")
             size=$(du -h "$f" | cut -f1)
-
-            if [[ "$name" == *"bootloader"* ]]; then
-              addr="0x0000"
-            elif [[ "$name" == *"partition"* ]]; then
-              addr="0x8000"
-            else
-              addr="0x10000"
-            fi
-
-            echo "| $name | \`$addr\` | $size |" >> $GITHUB_STEP_SUMMARY
+            echo "- $name ($size)" >> $GITHUB_STEP_SUMMARY
           done
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Flash using esptool or ESPFlash" >> $GITHUB_STEP_SUMMARY
