@@ -1,4 +1,4 @@
-name: Build ESP32-S3-Zero IBMOVS Chat
+name: Build IBMOVS Chat ESP32-S3-Zero
 
 on:
   push:
@@ -38,13 +38,13 @@ jobs:
         run: |
           mkdir -p sketch
           [ -f IBMOVS_Chat_v3.ino ] && cp IBMOVS_Chat_v3.ino sketch/sketch.ino || true
+          ls sketch/
 
       - name: Compile Sketch
         run: |
+          # CDCOnBoot=cdc is REQUIRED for ESP32-S3-Zero USB serial to work
           arduino-cli compile \
-            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,FlashSize=4M,PartitionScheme=default" \
-            --build-property build.flash_mode=qio \
-            --build-property build.flash_freq=80m \
+            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,FlashSize=4M,PartitionScheme=default,FlashFreq=80,FlashMode=qio" \
             --output-dir build \
             ./sketch
 
@@ -55,31 +55,31 @@ jobs:
         run: |
           cd build
           for f in *.bin; do
-            mv "$f" "IBMOVS_Chat_v3_${f}"
+            mv "$f" "IBMOVS_v3_${f}"
           done
           ls -lh
 
-      - name: Upload BIN Artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: IBMOVS-Chat-v3-ESP32S3Zero
-          path: |
-            build/*.bin
-            build/*.elf
+          name: IBMOVS-Chat-v3-Bins
+          path: build/*.bin
           retention-days: 30
 
-      - name: Print Build Summary
+      - name: Build Summary
         run: |
-          echo "## Build Complete ✅" >> $GITHUB_STEP_SUMMARY
-          echo "| File | Flash Address | Size |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|--------------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Address | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|---------|------|" >> $GITHUB_STEP_SUMMARY
           for f in build/*.bin; do
-            size=$(du -h "$f" | cut -f1)
             name=$(basename "$f")
-            if [[ "$name" == *"bootloader"* ]]; then addr="0x0000"
-            elif [[ "$name" == *"partitions"* ]]; then addr="0x8000"
+            size=$(du -h "$f" | cut -f1)
+            if   [[ "$name" == *"bootloader"* ]]; then addr="0x0000"
+            elif [[ "$name" == *"partition"* ]];  then addr="0x8000"
             else addr="0x10000"; fi
-            echo "| $name | $addr | $size |" >> $GITHUB_STEP_SUMMARY
+            echo "| $name | \`$addr\` | $size |" >> $GITHUB_STEP_SUMMARY
           done
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ⚠️ Flash ALL 3 BIN files at correct addresses!" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚠️ Flash ALL 3 files at correct addresses!" >> $GITHUB_STEP_SUMMARY
+          echo "Use ESPFlash or esptool.py" >> $GITHUB_STEP_SUMMARY
