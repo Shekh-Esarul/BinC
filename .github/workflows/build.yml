@@ -37,19 +37,19 @@ jobs:
       - name: Prepare Sketch Folder
         run: |
           mkdir -p sketch
-          # If .ino is in root, move it; otherwise it stays in sketch/
           [ -f IBMOVS_Chat_v3.ino ] && cp IBMOVS_Chat_v3.ino sketch/sketch.ino || true
 
       - name: Compile Sketch
         run: |
           arduino-cli compile \
-            --fqbn esp32:esp32:waveshare_esp32_s3_zero \
+            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,FlashSize=4M,PartitionScheme=default" \
             --build-property build.flash_mode=qio \
             --build-property build.flash_freq=80m \
-            --build-property build.flash_size=4MB \
-            --build-property build.partitions=default \
             --output-dir build \
             ./sketch
+
+      - name: List build output
+        run: ls -lh build/
 
       - name: Rename BIN files
         run: |
@@ -71,9 +71,15 @@ jobs:
       - name: Print Build Summary
         run: |
           echo "## Build Complete ✅" >> $GITHUB_STEP_SUMMARY
-          echo "| File | Size |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Flash Address | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------------|------|" >> $GITHUB_STEP_SUMMARY
           for f in build/*.bin; do
             size=$(du -h "$f" | cut -f1)
-            echo "| $(basename $f) | $size |" >> $GITHUB_STEP_SUMMARY
+            name=$(basename "$f")
+            if [[ "$name" == *"bootloader"* ]]; then addr="0x0000"
+            elif [[ "$name" == *"partitions"* ]]; then addr="0x8000"
+            else addr="0x10000"; fi
+            echo "| $name | $addr | $size |" >> $GITHUB_STEP_SUMMARY
           done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚠️ Flash ALL 3 BIN files at correct addresses!" >> $GITHUB_STEP_SUMMARY
